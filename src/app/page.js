@@ -14,9 +14,16 @@ const ISSUE_TYPES = [
   'HORTICULTURE'
 ];
 
-function FileUploadField({ id, label, hint, accept, icon, onChange, file }) {
+function FileUploadField({ id, label, hint, accept, icon, onChange, file, captureLabel }) {
   const [dragOver, setDragOver] = useState(false);
   const inputRef = useRef(null);
+  const captureRef = useRef(null);
+
+  const handleFileInput = (e) => {
+    if (e.target.files[0]) onChange(e.target.files[0]);
+    // Reset so picking the same file / retaking a photo fires onChange again
+    e.target.value = '';
+  };
 
   const handleDrop = useCallback((e) => {
     e.preventDefault();
@@ -46,7 +53,18 @@ function FileUploadField({ id, label, hint, accept, icon, onChange, file }) {
           id={id}
           type="file"
           accept={accept}
-          onChange={(e) => { if (e.target.files[0]) onChange(e.target.files[0]); }}
+          onChange={handleFileInput}
+          style={{ display: 'none' }}
+        />
+        {/* Separate input with `capture` — Android's Photo Picker (opened for a plain
+            accept="image/*" input) has no camera option, so we open the camera directly. */}
+        <input
+          ref={captureRef}
+          id={`${id}-capture`}
+          type="file"
+          accept={accept}
+          capture="environment"
+          onChange={handleFileInput}
           style={{ display: 'none' }}
         />
         {file ? (
@@ -63,6 +81,24 @@ function FileUploadField({ id, label, hint, accept, icon, onChange, file }) {
             <span className="upload-label">Drag & drop or click to upload</span>
             <span className="upload-hint">{hint}</span>
           </>
+        )}
+        {captureLabel && (
+          <div className="upload-actions">
+            <button
+              type="button"
+              className="upload-action-btn"
+              onClick={(e) => { e.stopPropagation(); captureRef.current?.click(); }}
+            >
+              📷 {captureLabel}
+            </button>
+            <button
+              type="button"
+              className="upload-action-btn"
+              onClick={(e) => { e.stopPropagation(); inputRef.current?.click(); }}
+            >
+              📁 Gallery
+            </button>
+          </div>
         )}
       </div>
     </div>
@@ -317,6 +353,7 @@ export default function ComplaintPage() {
                     hint="JPG, PNG or WEBP — max 10 MB"
                     accept="image/*"
                     icon="🖼️"
+                    captureLabel="Take Photo"
                     file={photoFile}
                     onChange={setPhotoFile}
                   />
@@ -326,6 +363,7 @@ export default function ComplaintPage() {
                     hint="MP4, MOV or WEBM — max 50 MB"
                     accept="video/*"
                     icon="🎬"
+                    captureLabel="Record Video"
                     file={videoFile}
                     onChange={setVideoFile}
                   />
