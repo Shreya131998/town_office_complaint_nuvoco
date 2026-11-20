@@ -14,6 +14,37 @@ const ISSUE_TYPES = [
   'HORTICULTURE'
 ];
 
+// Vercel rejects request bodies over 4.5 MB, and phone camera photos are often
+// larger. Downscale images in the browser so they always fit.
+const MAX_UPLOAD_BYTES = 4 * 1024 * 1024;
+
+async function compressImage(file, maxDim = 1600, quality = 0.8) {
+  if (!file.type.startsWith('image/') || file.type === 'image/gif') return file;
+  try {
+    const url = URL.createObjectURL(file);
+    const img = await new Promise((resolve, reject) => {
+      const el = new Image();
+      el.onload = () => resolve(el);
+      el.onerror = reject;
+      el.src = url;
+    });
+    URL.revokeObjectURL(url);
+
+    const scale = Math.min(1, maxDim / Math.max(img.naturalWidth, img.naturalHeight));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(img.naturalWidth * scale);
+    canvas.height = Math.round(img.naturalHeight * scale);
+    canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', quality));
+    if (!blob || blob.size >= file.size) return file;
+    const name = (file.name || 'photo').replace(/\.[^.]+$/, '') + '.jpg';
+    return new File([blob], name, { type: 'image/jpeg', lastModified: Date.now() });
+  } catch {
+    return file; // Format the browser can't decode — send as-is
+  }
+}
+
 function FileUploadField({ id, label, hint, accept, icon, onChange, file, captureLabel }) {
   const [dragOver, setDragOver] = useState(false);
   const inputRef = useRef(null);
@@ -158,6 +189,12 @@ export default function ComplaintPage() {
       return;
     }
 
+    const totalSize = (photoFile?.size || 0) + (videoFile?.size || 0);
+    if (totalSize > MAX_UPLOAD_BYTES) {
+      addToast('error', 'Attachments are too large (max 4 MB in total). Please record a shorter video or choose a smaller file.');
+      return;
+    }
+
     setLoading(true);
 
     try {
@@ -171,6 +208,10 @@ export default function ComplaintPage() {
       if (videoFile) data.append('video', videoFile);
 
       const res = await fetch('/api/submit', { method: 'POST', body: data });
+      if (res.status === 413) {
+        addToast('error', 'Attachments are too large to upload. Please choose a smaller file.');
+        return;
+      }
       const json = await res.json();
 
       if (json.success) {
@@ -350,17 +391,17 @@ export default function ComplaintPage() {
                   <FileUploadField
                     id="photo-upload"
                     label="Upload Photo"
-                    hint="JPG, PNG or WEBP — max 10 MB"
+                    hint="JPG, PNG or WEBP — large photos are resized automatically"
                     accept="image/*"
                     icon="🖼️"
                     captureLabel="Take Photo"
                     file={photoFile}
-                    onChange={setPhotoFile}
+                    onChange={async (f) => setPhotoFile(await compressImage(f))}
                   />
                   <FileUploadField
                     id="video-upload"
                     label="Upload Video"
-                    hint="MP4, MOV or WEBM — max 50 MB"
+                    hint="MP4, MOV or WEBM — max 4 MB (a few seconds)"
                     accept="video/*"
                     icon="🎬"
                     captureLabel="Record Video"
