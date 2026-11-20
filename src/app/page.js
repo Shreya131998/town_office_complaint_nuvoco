@@ -1,6 +1,7 @@
 'use client';
 
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import '@/app/globals.css';
 
 const ISSUE_TYPES = [
@@ -45,10 +46,168 @@ async function compressImage(file, maxDim = 1600, quality = 0.8) {
   }
 }
 
+// Android Chrome silently ignores `capture` and opens the gallery when Chrome lacks the
+// Android camera permission (and some phones' browsers ignore it entirely). So on
+// non-iOS devices we open our own in-page camera via getUserMedia, which shows a real
+// permission prompt and lets us explain what to do if the camera is blocked.
+// iOS Safari handles `capture` reliably, so it keeps the native camera.
+function shouldUseInPageCamera() {
+  if (typeof window === 'undefined') return false;
+  const ua = navigator.userAgent;
+  const isIOS = /iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
+  return !isIOS && window.isSecureContext && !!navigator.mediaDevices?.getUserMedia;
+}
+
+const MAX_VIDEO_SECONDS = 25; // ~1 Mbps → about 3.3 MB, under the upload limit
+
+function pickRecorderMime() {
+  if (typeof MediaRecorder === 'undefined') return '';
+  const types = ['video/webm;codecs=vp8,opus', 'video/webm', 'video/mp4'];
+  return types.find((t) => MediaRecorder.isTypeSupported(t)) || '';
+}
+
+function CameraModal({ mode, onCapture, onClose, onFallback }) {
+  const videoRef = useRef(null);
+  const streamRef = useRef(null);
+  const recorderRef = useRef(null);
+  const chunksRef = useRef([]);
+  const timerRef = useRef(null);
+  const [status, setStatus] = useState('starting'); // starting | ready | recording | blocked | error
+  const [seconds, setSeconds] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+          audio: mode === 'video',
+        });
+        if (cancelled) { stream.getTracks().forEach((t) => t.stop()); return; }
+        streamRef.current = stream;
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          await videoRef.current.play().catch(() => {});
+        }
+        setStatus('ready');
+      } catch (err) {
+        if (cancelled) return;
+        setStatus(err?.name === 'NotAllowedError' || err?.name === 'SecurityError' ? 'blocked' : 'error');
+      }
+    })();
+    return () => {
+      cancelled = true;
+      clearInterval(timerRef.current);
+      if (recorderRef.current?.state === 'recording') recorderRef.current.stop();
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+    };
+  }, [mode]);
+
+  const takePhoto = () => {
+    const video = videoRef.current;
+    if (!video?.videoWidth) return;
+    const scale = Math.min(1, 1600 / Math.max(video.videoWidth, video.videoHeight));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(video.videoWidth * scale);
+    canvas.height = Math.round(video.videoHeight * scale);
+    canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+    canvas.toBlob((blob) => {
+      if (!blob) return;
+      onCapture(new File([blob], `photo-${Date.now()}.jpg`, { type: 'image/jpeg' }));
+    }, 'image/jpeg', 0.85);
+  };
+
+  const stopRecording = () => {
+    clearInterval(timerRef.current);
+    if (recorderRef.current?.state === 'recording') recorderRef.current.stop();
+  };
+
+  const startRecording = () => {
+    const mimeType = pickRecorderMime();
+    if (!mimeType) { setStatus('error'); return; }
+    chunksRef.current = [];
+    const recorder = new MediaRecorder(streamRef.current, {
+      mimeType,
+      videoBitsPerSecond: 1_000_000,
+      audioBitsPerSecond: 64_000,
+    });
+    recorder.ondataavailable = (e) => { if (e.data.size) chunksRef.current.push(e.data); };
+    recorder.onstop = () => {
+      const type = mimeType.split(';')[0];
+      const blob = new Blob(chunksRef.current, { type });
+      if (blob.size) onCapture(new File([blob], `video-${Date.now()}.${type === 'video/mp4' ? 'mp4' : 'webm'}`, { type }));
+    };
+    recorder.start(1000);
+    recorderRef.current = recorder;
+    setSeconds(0);
+    setStatus('recording');
+    timerRef.current = setInterval(() => {
+      setSeconds((s) => {
+        if (s + 1 >= MAX_VIDEO_SECONDS) stopRecording();
+        return s + 1;
+      });
+    }, 1000);
+  };
+
+  return createPortal(
+    <div className="camera-modal" role="dialog" aria-modal="true" aria-label={mode === 'video' ? 'Record video' : 'Take photo'}>
+      <video ref={videoRef} className="camera-video" playsInline muted autoPlay />
+
+      {(status === 'blocked' || status === 'error') && (
+        <div className="camera-message">
+          {status === 'blocked' ? (
+            <>
+              <p className="camera-message-title">Camera access is blocked</p>
+              <p>To allow it in Chrome: tap the icon to the left of the web address → <b>Permissions</b> → turn on <b>Camera</b>{mode === 'video' ? ' and Microphone' : ''}, then try again.</p>
+              <p>If it is still blocked: open phone <b>Settings → Apps → Chrome → Permissions → Camera → Allow</b>.</p>
+            </>
+          ) : (
+            <>
+              <p className="camera-message-title">Couldn&apos;t start the camera here</p>
+              <p>You can use your phone&apos;s camera app instead.</p>
+            </>
+          )}
+          <button type="button" className="upload-action-btn" onClick={onFallback}>
+            📷 Use phone camera app
+          </button>
+        </div>
+      )}
+
+      {status === 'recording' && (
+        <div className="camera-timer">● {seconds}s / {MAX_VIDEO_SECONDS}s</div>
+      )}
+
+      <div className="camera-controls">
+        <button type="button" className="camera-cancel" onClick={onClose}>Cancel</button>
+        {mode === 'photo' && (
+          <button type="button" className="camera-shutter" aria-label="Take photo"
+            disabled={status !== 'ready'} onClick={takePhoto} />
+        )}
+        {mode === 'video' && (
+          <button type="button"
+            className={`camera-shutter video ${status === 'recording' ? 'recording' : ''}`}
+            aria-label={status === 'recording' ? 'Stop recording' : 'Start recording'}
+            disabled={status !== 'ready' && status !== 'recording'}
+            onClick={status === 'recording' ? stopRecording : startRecording} />
+        )}
+        <span className="camera-spacer" />
+      </div>
+    </div>,
+    document.body
+  );
+}
+
 function FileUploadField({ id, label, hint, accept, icon, onChange, file, captureLabel }) {
   const [dragOver, setDragOver] = useState(false);
+  const [cameraOpen, setCameraOpen] = useState(false);
   const inputRef = useRef(null);
   const captureRef = useRef(null);
+  const cameraMode = accept.startsWith('video') ? 'video' : 'photo';
+
+  const openCamera = () => {
+    if (shouldUseInPageCamera()) setCameraOpen(true);
+    else captureRef.current?.click();
+  };
 
   const handleFileInput = (e) => {
     if (e.target.files[0]) onChange(e.target.files[0]);
@@ -123,7 +282,7 @@ function FileUploadField({ id, label, hint, accept, icon, onChange, file, captur
             <button
               type="button"
               className="upload-action-btn"
-              onClick={(e) => { e.stopPropagation(); captureRef.current?.click(); }}
+              onClick={(e) => { e.stopPropagation(); openCamera(); }}
             >
               📷 {captureLabel}
             </button>
@@ -137,6 +296,14 @@ function FileUploadField({ id, label, hint, accept, icon, onChange, file, captur
           </div>
         )}
       </div>
+      {cameraOpen && (
+        <CameraModal
+          mode={cameraMode}
+          onCapture={(f) => { setCameraOpen(false); onChange(f); }}
+          onClose={() => setCameraOpen(false)}
+          onFallback={() => { setCameraOpen(false); captureRef.current?.click(); }}
+        />
+      )}
     </div>
   );
 }
