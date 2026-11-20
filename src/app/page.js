@@ -77,7 +77,12 @@ function FileUploadField({ id, label, hint, accept, icon, onChange, file, captur
         onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
         onDragLeave={() => setDragOver(false)}
         onDrop={handleDrop}
-        onClick={() => inputRef.current?.click()}
+        onClick={(e) => {
+          // Clicks on the buttons or hidden inputs bubble up here. Without this check,
+          // "Take Photo" also opened the gallery input, and Android showed the gallery.
+          if (e.target.closest('button, input')) return;
+          inputRef.current?.click();
+        }}
       >
         <input
           ref={inputRef}
